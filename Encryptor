@@ -1,0 +1,185 @@
+local Bit = bit or bit32
+
+if not Bit then
+    Bit = {}
+    local MOD = 2 ^ 32
+    local MODM = MOD - 1
+
+    function Bit.bxor(Key_Byte: number, Data_Byte: number): number
+        local Power, Result = 1, 0
+        while Key_Byte > 0 and Data_Byte > 0 do
+            local Result_Key_Byte, Result_Data_Byte = Key_Byte % 2, Data_Byte % 2
+            if Result_Key_Byte ~= Result_Data_Byte then
+                Result = Result + Power
+            end
+
+            Key_Byte, Data_Byte, Power = (Key_Byte - Result_Key_Byte) / 2, (Data_Byte - Result_Data_Byte) / 2, Power * 2
+        end
+
+        if Key_Byte < Data_Byte then
+            Key_Byte = Data_Byte
+        end
+
+        while Key_Byte > 0 do
+            local Result_Key_Byte = Key_Byte % 2
+            if Result_Key_Byte > 0 then
+                Result = Result + Power
+            end
+
+            Key_Byte, Power = (Key_Byte - Result_Key_Byte) / 2, Power * 2
+        end
+        return Result
+    end
+
+    function Bit.band(Key_Byte: number, Data_Byte: number): number
+        return (Key_Byte + Data_Byte - Bit.bxor(Key_Byte, Data_Byte)) / 2
+    end
+
+    function Bit.bor(Key_Byte: number, Data_Byte: number): number
+        return MODM - Bit.band((MODM - Key_Byte), (MODM - Data_Byte))
+    end
+
+    function Bit.lshift(Value: number, Shift: number): number
+        if Shift < 0 then
+            return Bit.rshift(Value, -Shift)
+        end
+        return Value * 2 ^ Shift % MOD
+    end
+
+    function Bit.rshift(Value: number, Shift: number): number
+        if Shift < 0 then
+            return Bit.lshift(Value, -Shift)
+        end
+        return math.floor(Value % MOD / 2 ^ Shift)
+    end
+end
+
+local Utf8 = utf8
+if not Utf8 then
+    Utf8 = {}
+
+    function Utf8.char(...: number): string
+        local Buffer = {}
+        for _, Codepoint in next, { ... } do
+            if Codepoint < 0 or Codepoint > 1114111 then
+                error("bad argument to char (out of range)", 2)
+            end
+
+            if Codepoint < 128 then
+                table.insert(Buffer, string.char(Codepoint))
+            elseif Codepoint < 2048 then
+                local Bit_Key_1 = Bit.bor(192, Bit.band(Bit.rshift(Codepoint, 6), 31))
+                local Bit_Key_2 = Bit.bor(128, Bit.band(Codepoint, 63))
+                table.insert(Buffer, string.char(Bit_Key_1, Bit_Key_2))
+            elseif Codepoint < 65536 then
+                local Bit_Key_1 = Bit.bor(224, Bit.band(Bit.rshift(Codepoint, 12), 15))
+                local Bit_Key_2 = Bit.bor(128, Bit.band(Bit.rshift(Codepoint, 6), 63))
+                local B3 = Bit.bor(128, Bit.band(Codepoint, 63))
+                table.insert(Buffer, string.char(Bit_Key_1, Bit_Key_2, B3))
+            else
+                local Bit_Key_1 = Bit.bor(240, Bit.band(Bit.rshift(Codepoint, 18), 7))
+                local Bit_Key_2 = Bit.bor(128, Bit.band(Bit.rshift(Codepoint, 12), 63))
+                local B3 = Bit.bor(128, Bit.band(Bit.rshift(Codepoint, 6), 63))
+                local B4 = Bit.bor(128, Bit.band(Codepoint, 63))
+                table.insert(Buffer, string.char(Bit_Key_1, Bit_Key_2, B3, B4))
+            end
+        end
+        return table.concat(Buffer)
+    end
+end
+
+local Helpers = {}
+
+function Helpers:StringToBytes(Text: string): string
+    local Bytes = { Text:byte(1, -1) }
+    for Index = 1, #Bytes do
+        Bytes[Index] = Bytes[Index] + 12
+    end
+    return table.concat(Bytes, "'")
+end
+
+function Helpers:StringSplit(Text: string): { string }
+    local Result = {}
+    Text:gsub(".", function(Character)
+        Result[#Result + 1] = Character
+    end)
+    return Result
+end
+
+function Helpers:SplitBytes(Data: string): { string }
+    local Index = 0
+    local Result = {}
+    local Combined = ""
+    Data = Data:gsub("255'172", "")
+    for Chunk in string.gmatch(Data, "([^']+)") do
+        if Index == 1 then
+            Index = 0
+            Combined = Combined .. "'" .. Chunk
+            table.insert(Result, Combined)
+        else
+            Combined = Chunk
+            Index = Index + 1
+        end
+    end
+    return Result
+end
+
+function Helpers:ToBytes(Text: string): string
+    return Text:gsub(".", function(Character)
+        return "\\" .. Character:byte()
+    end)
+end
+
+function Helpers:ToString(Data: string): string
+    return Data
+        :gsub("\\(%d+)", function(Byte)
+            return Byte:char()
+        end)
+        :gsub("\\", "")
+end
+
+local AsciiCharacters = {
+    "\\", "0", "1", "2", "3",
+    "4", "5", "6", "7", "8", "9",
+}
+
+local ReplacementCodepoints = {
+    917536, 917537, 917538, 917539, 917540,
+    917541, 917542, 917543, 917544, 917545, 917546,
+}
+
+local CharacterMap = {
+    characters = {} :: { [string]: number },
+    reverse = {} :: { [string]: string },
+}
+
+for Index, Character in pairs(AsciiCharacters) do
+    local Codepoint = ReplacementCodepoints[Index]
+    CharacterMap.characters[Character] = Codepoint
+    local Key = Helpers:StringToBytes(Utf8.char(Codepoint)):gsub("255'172'", "")
+    CharacterMap.reverse[Key] = Character
+end
+
+local Encryptor = {}
+
+function Encryptor:Encode(Input: string): string
+    local Encoded = {}
+    local SplitCharacters = Helpers:StringSplit(Helpers:ToBytes(Input))
+    for Index, Character in next, SplitCharacters do
+        local Codepoint = CharacterMap.characters[Character]
+        Encoded[Index] = Utf8.char(Codepoint)
+    end
+    return table.concat(Encoded)
+end
+
+function Encryptor:Decode(Input: string): string
+    local Decoded = {}
+    local Bytes = Helpers:SplitBytes(Helpers:StringToBytes(Input))
+    for Index, Byte in next, Bytes do
+        Decoded[Index] = CharacterMap.reverse[Byte]
+    end
+    return Helpers:ToString(table.concat(Decoded))
+end
+
+Encryptor.Helpers = Helpers
+return Encryptor
